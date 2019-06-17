@@ -1,0 +1,385 @@
+---
+title: "Predicting Risk of Readmission Among Adults Using Detox, 10/2016 - 9/2018"
+author: "Jessica Streeter, Data Scientist | Data Informatics"
+date: '`r format(Sys.time(), "%B %d, %Y")`'
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+#knitr::opts_chunk$set(fig.align = "center")
+#knitr::opts_chunk$set(fig.height = 4)
+knitr::opts_chunk$set(warning = FALSE)
+knitr::opts_chunk$set(message = FALSE)
+#knitr::opts_chunk$set(fig.pos = 'H')
+
+
+options(tinytex.verbose = TRUE) #long form errors issued for latex
+#options(kableExtra.latex.load_packages = FALSE) #need this to get kableextra and tinytex to play nice
+#options(knitr.table.format = "latex")
+
+library(tidyverse)
+library(lubridate)
+library(stringr)
+library(gridExtra)
+library(ggpubr)
+library(survival)
+library(survminer)
+library(magrittr)
+library(broom)  
+
+basetidy <- read_csv("basetidy.csv")
+basetidy_indiv <- read_csv("basetidy_indiv.csv")
+baseindiv_spread <- read_csv("baseindiv_spread.csv")
+
+
+IndexLOC <- 'Detox'
+IndexDaystoReadmit <- '90'
+IndexTimeframe <- '10/2016 and 9/2018'
+ReadmitLOC <- 'Detox'
+IndexAgeGroup <- 'Adult'
+```
+
+
+
+### Goal
+To understand our detox utilization among members age 18 and older, and how various factors impact the risk of readmission to detox within 90 months.
+
+### Data
+Our baseline population was any member with a detox admission between `r IndexTimeFrame`.  If a member had more than one `r str_to_lower(IndexLOC)` episode during the time period, only the first episode was used.  In addition to demographics and eligibility, we looked at service utilization in the year before admission, as well as follow-up service utilization in the period after discharge.  The period after discharge spans from discharge to `r IndexDaystoReadmit` days, or until readmission; whichever occurs first. 
+
+Members who are discharged on the day of admission and members who readmit on the same or next day are both included.
+
+
+
+### Fast Facts About The Members
+
+* `r nrow(baseindiv_spread)` unique individuals used inpatient at least once during the time frame.
+* `r round(nrow(baseindiv_spread[baseindiv_spread$Gender_Label == "Male",])/nrow(baseindiv_spread) * 100, 1)`% are male.
+* The average age is `r round(mean(baseindiv_spread$Age,1))`, and `r round(nrow(baseindiv_spread[baseindiv_spread$Age <= 30,])/nrow(baseindiv_spread) * 100, 1)`% are under 30.
+* Almost half of the population is white (`r round(nrow(baseindiv_spread[baseindiv_spread$RaceCat == "White",])/nrow(baseindiv_spread) * 100, 1)`%).
+
+
+### Fast Facts About The Index Stay 
+
+* The median LOS is `r round(median(baseindiv_spread$LOS),1)` nights, with a range of `r round(min(baseindiv_spread$LOS),1)` to `r round(max(baseindiv_spread$LOS),1)`.
+* `r round(nrow(baseindiv_spread[baseindiv_spread$FirstEpEver=="Y",])/nrow(baseindiv_spread) * 100, 1)`% of members in this cohort have never previously been in a detox as a CBH member. 
+* `r round(nrow(baseindiv_spread[baseindiv_spread$Flag_Readmit=="Yes",])/nrow(baseindiv_spread) * 100, 1)`% readmit to detox within `r max(baseindiv_spread$SurvivalDays)` days.  `r round(nrow(baseindiv_spread[baseindiv_spread$Flag_Readmit=="Yes" & baseindiv_spread$SurvivalDays <= 30,])/nrow(baseindiv_spread) * 100, 1)` readmit within 30 days and `r round(nrow(baseindiv_spread[baseindiv_spread$Flag_Readmit=="Yes" & baseindiv_spread$SurvivalDays <= 60,])/nrow(baseindiv_spread) * 100, 1)` readmit within 60 days.
+* The average time to readmission is `r round(mean(baseindiv_spread$Days_to_Readmit, na.rm = TRUE),1)` days with `r round(nrow(baseindiv_spread[baseindiv_spread$Flag_Readmit=="Yes" & baseindiv_spread$Days_to_Readmit <= 30,])/nrow(baseindiv_spread[baseindiv_spread$Flag_Readmit=="Yes",]) * 100, 1)`% of all readmissions occuring within the first 30 days.
+
+
+### Summary Figures
+
+* Figure 1 highlights the LOS distribution for the overall population, as well as a few subgroups of interest.  Most demographic breakdowns do not differ significantly by LOS. 
+* Figure 2 highlights when members typically readmit.  
+* Figures 3 and 4 show information about the service utilization after discharge.
+* Figure 5 shows which factors significantly impact the risk of readmission. Other factors, like race, gender, and other service utilization, were included in the model but were not statistically significant. Hazard ratios are interpreted as follows: A HR of 2 means that group has double the risk of readmission compared to the reference group, while a HR of 0.7 means their risk is 30% lower (1-0.7) than the reference group.
+
+
+```{r Fig1and2, out.width=c('50%', '50%'), fig.show='hold', fig.height=7}
+#Boxplots describing index admission####
+#overall LOS
+figov <- basetidy_indiv %>%
+  ggplot(aes(y = LOS, x =1)) +
+  geom_jitter(width = .3 , alpha = .1, color = "blue") +
+  geom_boxplot(fill = 'blue', alpha = .2, color = "black") +
+  labs(title = "LOS Overall") +
+  ylab("LOS (Days)") +
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        axis.title.x = element_blank(),
+        legend.position = "none") +
+    coord_cartesian(ylim = c(0,12))
+
+##LOS by race
+figrace <- basetidy_indiv %>%
+  ggplot(aes(x = RaceCat, y = LOS, color = RaceCat, fill = RaceCat)) +
+  geom_jitter(width = .3 , alpha = .1) +
+  geom_boxplot(alpha = .2, color = "black") +
+  labs(title = "Race", 
+       #subtitle = paste0("Index Episodes between ", IndexTimeframe), 
+       #caption = paste0("N members that readmit: ", nrow(basetidy_indiv[basetidy_indiv$Flag_Readmit == "Yes",]), 
+       #               "; \nN members that don't readmit: ", nrow(basetidy_indiv[basetidy_indiv$Flag_Readmit == "No",])),
+       fill = "Race") +
+  ylab("LOS (Days)") +
+  xlab("Race") +
+  theme(axis.text.x = element_text(angle = 45, vjust = .5),
+        axis.title.x = element_blank(),
+        #legend.text = element_text(size = 8),
+        #legend.title = element_text(size = 8),
+        legend.position = "none"
+  ) + #removes x axis labels
+  guides(color = FALSE) +
+  coord_cartesian(ylim = c(0, 12))
+
+##LOS by age
+figage <- basetidy_indiv %>%
+  ggplot(aes(x = AgeCat2, y = LOS, color = AgeCat2, fill = AgeCat2)) +
+  geom_jitter(width = .3 , alpha = .1) +
+  geom_boxplot(alpha = .2, color = "black") +
+  labs(title = "Age at Admit", 
+       #subtitle = paste0("Index Episodes between ", IndexTimeframe), 
+       #caption = paste0("N members that readmit: ", nrow(basetidy_indiv[basetidy_indiv$Flag_Readmit == "Yes",]), 
+       #               "; \nN members that don't readmit: ", nrow(basetidy_indiv[basetidy_indiv$Flag_Readmit == "No",])),
+       fill = "Age at Admission") +
+  ylab("LOS (Days)") +
+  xlab("Age Category at Admission") +
+  theme(axis.text.x = element_text(angle = 45, vjust = .5),
+        axis.title.x = element_blank(),
+        #legend.text = element_text(size = 8),
+        #legend.title = element_text(size = 8),
+        legend.position = "none"
+  ) + #removes x axis labels
+  guides(color = FALSE) +
+  coord_cartesian(ylim = c(0, 12))
+
+
+##LOS by firstaipever
+figfirst <- basetidy_indiv %>%
+  ggplot(aes(x = FirstEpEver, y = LOS, color = FirstEpEver, fill = FirstEpEver)) +
+  geom_jitter(width = .3 , alpha = .1) +
+  geom_boxplot(alpha = .2, color = "black") +
+  labs(title = paste0("First ", IndexLOC, " Ever")
+       #subtitle = paste0("Index Episodes between ", IndexTimeframe), 
+       #caption = paste0("N members that readmit: ", nrow(basetidy_indiv[basetidy_indiv$Flag_Readmit == "Yes",]), 
+       #               "; \nN members that don't readmit: ", nrow(basetidy_indiv[basetidy_indiv$Flag_Readmit == "No",])),
+  ) +
+  ylab("LOS (Days)") +
+  scale_x_discrete(labels = c("No","Yes")) +
+  theme(axis.text.x = element_text(angle = 45, vjust = .5),
+        axis.title.x = element_blank(),
+        #legend.text = element_text(size = 8),
+        #legend.title = element_text(size = 8),
+        legend.position = "none"
+  ) + #removes x axis labels
+  guides(color = FALSE) +
+  coord_cartesian(ylim = c(0, 12))
+
+
+
+
+figsubLOS <- ggarrange(figov, figrace, figage, figfirst,
+                       nrow = 2, ncol = 2)
+
+annotate_figure(figsubLOS,
+                top = "Figure 1. Distribution of Index LOS by Select Subpopulations")
+
+
+#time to readmission quick figure####
+baseindiv_spread %>%
+  filter(Flag_Readmit == "Yes") %>%
+  mutate(Week_Cat = as.ordered(ifelse(Days_to_Readmit <=7, "Week 1", 
+                              ifelse(Days_to_Readmit <=15, "Week 2",
+                                     ifelse(Days_to_Readmit <= 21, "Week 3",
+                                            ifelse(Days_to_Readmit <= 30, "Week 4","Month"))))),
+         Readmit_Cat = as.ordered(ifelse(Days_to_Readmit <= 30, "Month 1",
+                            ifelse(Days_to_Readmit <= 60, "Month 2",
+                                    ifelse(Days_to_Readmit <= 90, "Month 3",
+                                           ifelse(Days_to_Readmit <= 120, "Month 4",
+                                                  ifelse(Days_to_Readmit <= 150, "Month 5", "Month 6"))))))) %>% 
+  group_by(Readmit_Cat, Week_Cat) %>%
+  summarize(n = n()) %>%
+  mutate(perc = n/nrow(baseindiv_spread[baseindiv_spread$Flag_Readmit == "Yes",])) %>%
+  ggplot(aes(x = Readmit_Cat, y = perc, group = Week_Cat, fill = Week_Cat)) +
+  geom_bar(stat = "identity") +
+  geom_label(aes(label = scales::percent(perc)), fill = "white", alpha = .4, position = position_stack(vjust = .5)) +
+  labs(title = "Figure 2: When Do Members Readmit?",
+       x = "Time to Readmission",
+       y = "Percent of Readmitting Members",
+       color = "") +
+  scale_y_continuous(labels = scales::percent) +
+  scale_fill_viridis_d(option = "D")
+
+```
+```{r Fig3and4, out.width=c('50%', '50%'), fig.show='hold', fig.height=6}
+#service use in the time after discharge by percent
+basetidy %>%
+  filter(BA_Category %in% c("After") & Measure_Name %in% c("After Service")) %>%
+  select(Client_Master_BK, LOC, Day_Count, SurvivalDays) %>%
+  group_by(Client_Master_BK, LOC, SurvivalDays) %>%
+  summarize(Days = sum(Day_Count)) %>%#need this step bc some folks have 2 lines of data for same LOC. Not sure why stored proc code would do that.
+  mutate(RateDays30 = Days/SurvivalDays * 30) %>% 
+  group_by (LOC) %>%
+  summarize(N_UsingService = n(),
+            Perc_UsingService = n()/length(unique(basetidy$Client_Master_BK)) * 100, 
+            AvgRateDays30 = mean(RateDays30, na.rm = TRUE)) %>%
+  ggplot(aes(x = reorder(LOC, -Perc_UsingService), y = Perc_UsingService)) +
+  geom_bar(stat = "identity", fill = "blue", alpha = .5) +
+  geom_text(aes(label = paste0(round(Perc_UsingService,1),"%")), vjust = 1) +
+  labs(title = "Figure 3. Percent of Members Using Services After Discharge", 
+       subtitle = paste0("Index Episodes between ", IndexTimeframe)) +
+  xlab("Level of Care") +
+  ylab("Percent of Members Using Service") +
+  theme(axis.text.x = element_text(angle = 45, vjust = .5))
+
+basetidy %>%
+  filter(BA_Category %in% c("After") & Measure_Name %in% c("After Service")) %>%
+  group_by(Client_Master_BK, BA_Category, Measure_Name, Measure_Period, LOC, SurvivalDays) %>%
+  select(Client_Master_BK, BA_Category, Measure_Name, Measure_Period, LOC, 
+         Day_Count, SurvivalDays, Flag_Readmit, ServiceEnd) %>%
+  mutate(yearDC = year(ymd(ServiceEnd))) %>%
+  group_by(Client_Master_BK, LOC, SurvivalDays, yearDC, Flag_Readmit) %>%
+  summarize(Days = sum(Day_Count)) %>%  #need this step bc some folks have 2 lines of data for same LOC. Not sure why stored proc code would do that.
+  mutate(RateDays30 = Days/SurvivalDays * 30) %>%
+  filter(is.na(LOC) == FALSE) %>%
+  ggplot(aes(x = reorder(LOC, -RateDays30), y = RateDays30)) +
+  geom_jitter(width = .3, alpha = .1, aes(fill = LOC, color = LOC)) +
+  geom_boxplot(alpha = .2,  outlier.shape = NA) +
+  labs(title = paste0("Figure 4. Distribution of Days of Service After Discharge from ", IndexLOC)) +
+  xlab("Level of Care") +
+  ylab("Days of utilization per 30 days in the community") +
+  theme(legend.position = "none", 
+        axis.text.x = element_text(angle = 45, vjust = .5)) +
+  coord_cartesian(ylim=c(0,30)) +
+  scale_fill_viridis_d() +
+  scale_colour_viridis_d()
+```
+```{r fig5, fig.pos='center', fig.height = 6}
+
+#Creating dataset for analysis & Defining Cats####
+baseindiv_cats <- baseindiv_spread %>% 
+  ungroup() %>% #bc base table is currently grouped by masterBK, which prevents all factors from working
+  select(-N_AIPAdmits_1YrAfter, -AuthorizationNumber, -Readmit_Auth, -Readmit_SB, 
+         -N_AIPDC_2YrPrior, -N_AIPDC_3YrPrior,
+         -starts_with("Yr2"), -starts_with("Yr3"), 
+         -ends_with("EAC"), -ends_with("RTFA"), -ends_with("JoH"))  %>%
+  mutate(After_23HrBed = as.factor(ifelse(is.na(After_23HrBed), 'No', 'Yes')),
+         After_ACT = as.factor(ifelse(is.na(After_ACT), "No", "Yes")),
+ #        After_AcutePartial = as.factor(ifelse(is.na(After_AcutePartial), "No", "Yes")),
+         After_BHSICM = as.factor(ifelse(is.na(After_BHSICM), "No", "Yes")),
+         After_CIRC = as.factor(ifelse(is.na(After_CIRC), "No", "Yes")),
+        # After_Detox = as.factor(ifelse(is.na(After_Detox), "No", "Yes")),
+         After_IOP = as.factor(ifelse(is.na(After_IOP), "No", "Yes")),
+         After_MAT = as.factor(ifelse(is.na(After_MAT), "No", "Yes")),
+         After_OP = as.factor(ifelse(is.na(After_OP), "No", "Yes")),
+         After_Rehab = as.factor(ifelse(is.na(After_Rehab), "No", "Yes")),
+         After_Subacute = as.factor(ifelse(is.na(After_Subacute), "No", "Yes")),
+         After_TCM = as.factor(ifelse(is.na(After_TCM), "No", "Yes"))
+         ) %>% #converting after services to binary
+  mutate(Yr1Prior_23HrBed = as.factor(ifelse(is.na(Yr1Prior_23HrBed), 'No', 'Yes')),
+         Yr1Prior_ACT = as.factor(ifelse(is.na(Yr1Prior_ACT), "No", "Yes")),
+#         Yr1Prior_AcutePartial = as.factor(ifelse(is.na(Yr1Prior_AcutePartial), "No", "Yes")),
+         Yr1Prior_BHSICM = as.factor(ifelse(is.na(Yr1Prior_BHSICM), "No", "Yes")),
+         Yr1Prior_CIRC = as.factor(ifelse(is.na(Yr1Prior_CIRC), "No", "Yes")),
+       #  Yr1Prior_Detox = as.factor(ifelse(is.na(Yr1Prior_Detox), "No", "Yes")),
+         Yr1Prior_IOP = as.factor(ifelse(is.na(Yr1Prior_IOP), "No", "Yes")),
+         Yr1Prior_MAT = as.factor(ifelse(is.na(Yr1Prior_MAT), "No", "Yes")),
+         Yr1Prior_OP = as.factor(ifelse(is.na(Yr1Prior_OP), "No", "Yes")),
+         Yr1Prior_Rehab = as.factor(ifelse(is.na(Yr1Prior_Rehab), "No", "Yes")),
+         Yr1Prior_Subacute = as.factor(ifelse(is.na(Yr1Prior_Subacute), "No", "Yes")),
+         Yr1Prior_TCM = as.factor(ifelse(is.na(Yr1Prior_TCM), "No", "Yes"))
+         ) %>% #converting prior services to binary
+  mutate(Yr1Prior_AnyAIP = as.factor(ifelse(is.na(N_AIPDC_1YrPrior), "No", "Yes")),
+         LOScat = as.factor(ifelse(LOS < 4, "LT 5 days", "5+ days")),
+         eligcat = as.factor(ifelse(is.na(Yr1Prior_Elig), "No Elig", 
+                                 ifelse(Yr1Prior_Elig <= 182, "Less than 50%", "50% +" ))),
+         AgeCat2 = factor(AgeCat2, order = F))  %>%
+  mutate(Flag_Readmit = ifelse(Flag_Readmit == "Yes", 1, 0)) %>%
+  select(-Yr1Prior_Elig, -ASD_Measure_Year, -ID_Measure_Year, -N_AIPDC_1YrPrior, -LOC_Label) 
+
+
+#SURVIVAL OBJECT####
+survival_object <- Surv(time = baseindiv_cats$SurvivalDays, event = baseindiv_cats$Flag_Readmit)
+
+#Cox Model####
+fit.coxph <- coxph(survival_object ~ 
+                     Gender_Label + RaceCat + AgeCat2 +
+                     LOScat + FirstEpEver +
+                   After_23HrBed + #After_ACT + #After_AcutePartial + 
+                     After_BHSICM + #After_CIRC + #After_Detox +
+                     After_IOP + After_MAT + After_OP + After_Rehab + 
+                      After_Subacute + After_TCM + 
+                   Yr1Prior_23HrBed + #Yr1Prior_ACT + #Yr1Prior_AcutePartial + 
+                      Yr1Prior_BHSICM + #Yr1Prior_CIRC + #Yr1Prior_Detox +
+                     Yr1Prior_IOP + Yr1Prior_MAT + 
+                      Yr1Prior_OP + Yr1Prior_Rehab + Yr1Prior_Subacute + Yr1Prior_TCM +
+                   Yr1Prior_AnyAIP +  eligcat,
+                     data = baseindiv_cats)
+
+#with broom
+
+CoxOutputs <- fit.coxph %>% 
+  tidy() %>%
+  mutate(HR = exp(estimate),
+         sig = as.factor(ifelse(p.value <= .05, "Yes", "No")),
+         HRconf.low = exp(conf.low),
+         HRconf.high = exp(conf.high),
+         RiskImpact = as.factor(ifelse(sig == "No", "No Impact",
+                    ifelse(HR < 1, "Decreases Risk", "Increases Risk"))))
+
+CoxOutputs %<>%
+  mutate(factors = ifelse(term=="Gender_LabelMale", "Male",
+                          ifelse(term=="RaceCatHispanic", "Hispanic (ref: Black)",
+                                 ifelse(term=="RaceCatWhite", "White (ref: Black)",
+                                        ifelse(term=="RaceCatOther", "Other (ref: White)",
+                                               ifelse(term=="AgeCat231 to 40", "31 to 40 (ref: 18-30yo)",
+                                                      ifelse(term=="AgeCat241 to 50", "41-50 (ref: 18-30yo)",
+                                                             ifelse(term=="AgeCat251+", "51+ (ref: 18-30yo)",
+                                                                    
+                           
+                              ifelse(term=="LOScatLT 5 days", "LOS Under 5 (ref: 5+)",
+                                        
+                                                ifelse(term=="FirstEpEverY", paste0("First ", ReadmitLOC, " Ever"),
+                                                       ifelse(term=="After_23HrBedYes", "FUP: 23 Hr Bed",
+                                                              ifelse(term=="After_ACTYes", "FUP: ACT", 
+                                                                    
+                    ifelse(term=="After_BHSICMYes", "FUP: BHSI-CM",
+                           ifelse(term=="After_CIRCYes", "FUP: CIRC",
+                                  
+                                  ifelse(term=="After_IOPYes", "FUP: IOP",
+                                         ifelse(term=="After_MATYes", "FUP: MAT",
+                                                ifelse(term=="After_OPYes", "FUP: OP",
+                                                       ifelse(term=="After_RehabYes", "FUP: Rehab",
+                                                              ifelse(term=="After_SubacuteYes", "FUP: Subacute",
+                                                                     ifelse(term=="After_TCMYes", "FUP: TCM",
+                    ifelse(term=="Yr1Prior_23HrBedYes", "Yr1Prior: 23 Hr Bed",
+                           ifelse(term=="Yr1Prior_ACTYes", "Yr1Prior: ACT", 
+                                  ifelse(term=="Yr1Prior_AcutePartialYes", "Yr1Prior: Acute Partial",
+                                         ifelse(term=="Yr1Prior_BHSICMYes", "Yr1Prior: BHSI-CM",
+                                                ifelse(term=="Yr1Prior_CIRCYes", "Yr1Prior: CIRC",
+                                                      
+                                                       ifelse(term=="Yr1Prior_IOPYes", "Yr1Prior: IOP",
+                                                              ifelse(term=="Yr1Prior_MATYes", "Yr1Prior: MAT",
+                                                                     ifelse(term=="Yr1Prior_OPYes", "Yr1Prior: OP",
+                                                                            ifelse(term=="Yr1Prior_RehabYes", "Yr1Prior: Rehab",
+                                                                                   ifelse(term=="Yr1Prior_SubacuteYes", "Yr1Prior: Subacute",
+                                                                                          ifelse(term=="Yr1Prior_TCMYes", "Yr1Prior: TCM",
+
+                ifelse(term == "eligcatLess than 50%", "Yr1Prior: Elig < 50% of Yr (ref: 50+%)",
+                       ifelse(term == "eligcatNo Elig", "Yr1Prior: Elig 0 Days (ref: 50+%)",
+                            ifelse(term=="Yr1Prior_AnyAIPYes", "Yr1Prior: AIP", "ERROR")
+                            )))))))))))))))))))))))))))))))))
+
+#plotting results of cox####
+#Sig factors only
+#Sig factors only
+CoxOutputs %>% 
+  filter(sig == "Yes") %>% 
+  ggplot(aes(x = factors, y = HR, color = RiskImpact)) +
+  geom_point( size = 4) +
+  geom_linerange(aes(x = factors, ymin = HRconf.low, ymax = HRconf.high, color = RiskImpact), 
+                 stat = 'identity', 
+                 size = 5, alpha = .3) +
+  geom_hline(yintercept = 1, size = 2, alpha = .4) +
+  geom_text(aes(label = round(HR,1)), vjust = -1, size = 3) +
+  labs(title = paste0("Impact of Service Utilization and Demographics \non Risk of ",IndexDaystoReadmit ," Day Readmission"),
+       subtitle = paste0(IndexLOC, " Discharges Among ", IndexAgeGroup, "s, ", IndexTimeframe),
+       x = "Factors",
+       y = "Hazard Ratio (1 = Not different from reference group)",
+       color = "Risk compared to ref group") +
+  scale_y_sqrt(breaks = seq(0,4,.5)) +
+  scale_color_manual(values = c("#2daf38", "#db0404", "#777676")) +
+  coord_flip() +
+  theme_cleveland() + 
+  theme(panel.background = element_rect(fill = "#f2f2f2"),
+        legend.position = "bottom")
+
+
+```
+
+
+
+
+
+
+
